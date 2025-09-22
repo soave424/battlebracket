@@ -1,2 +1,0 @@
-# battlebracket
-bentochallenge
