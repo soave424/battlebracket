@@ -1,0 +1,512 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getAuth, 
+    signInAnonymously, 
+    onAuthStateChanged,
+    signInWithCustomToken
+} from 'firebase/auth';
+import { 
+    getFirestore, 
+    collection, 
+    addDoc, 
+    onSnapshot, 
+    serverTimestamp,
+    query,
+    orderBy
+} from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Firebase Initialization ---
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// --- Default Game Data ---
+const defaultGame = {
+  id: 'default-food-game',
+  title: '무엇을 먹을까? (기본)',
+  isDefault: true,
+  items: [
+    { name: '3만원 스테이크', description: '만족감 : 4만원', imageUrl: 'https://recipe1.ezmember.co.kr/cache/recipe/2017/07/09/6741acc7f6bf0f7d04245851fb365c311.jpg' },
+    { name: '2만 5천원 피자', description: '만족감 : 4만원', imageUrl: 'https://akamai.pizzahut.co.kr/2020pizzahut-prod/public/img/menu/RPPZ1894_RPEG0016_RPDO0003_l.png' },
+    { name: '1만 1천원 스파게티', description: '만족감 : 2만원', imageUrl: 'https://godomall.speedycdn.net/ec5d2a1c8483712efb957784c858b320/goods/1000014371/image/add3/1000014371_add3_047.jpg' },
+    { name: '9천원 라면', description: '만족감 : 2만원', imageUrl: 'https://i.namu.wiki/i/2mrBrfSDXbBJHLjgyycsAhB0qLvjSZbvswmGtVTAupaEfuQ8Xuzp8wJiXyeDTsqz7blqGRYSjW5mbo1Wc4GP_w.webp' },
+    { name: '1만 7천원 치킨', description: '만족감 2만 5천원', imageUrl: 'https://www.amnews.co.kr/news/photo/201706/22467_11650_433.jpg' },
+    { name: '1만 5천원 닭강정', description: '만족감 2만 5천원', imageUrl: 'https://recipe1.ezmember.co.kr/cache/recipe/2021/11/23/79be623420f941990d3cf47c9d6cc1f81.jpg' },
+    { name: '4천원 김밥', description: '만족감 5천원', imageUrl: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQq0NvEvUVhM407fQyKVWGknTvFVRF-NxIeNg&s' },
+    { name: '3천원 햄버거', description: '만족감 5천원', imageUrl: 'https://newsimg.sedaily.com/2020/11/17/1ZAFYQN80J_1.jpg' }
+  ],
+  createdAt: { seconds: 1672531200 } // A fixed past date for consistency
+};
+
+// --- Helper Functions & Components ---
+
+function Notification({ message, onClear }) {
+    useEffect(() => {
+        if (message) {
+            const timer = setTimeout(() => {
+                onClear();
+            }, 3000);
+            return () => clearTimeout(timer);
+        }
+    }, [message, onClear]);
+
+    if (!message) return null;
+
+    return (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 bg-red-500 text-white py-2 px-6 rounded-lg shadow-lg animate-bounce">
+            {message}
+        </div>
+    );
+}
+
+// --- Main App Component ---
+export default function App() {
+    const [page, setPage] = useState('home'); // 'home', 'create', 'game'
+    const [games, setGames] = useState([defaultGame]);
+    const [selectedGame, setSelectedGame] = useState(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [notification, setNotification] = useState('');
+
+    useEffect(() => {
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+        script.async = true;
+        document.body.appendChild(script);
+    }, []);
+
+    useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+            if (!user) {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Authentication failed:", error);
+                    setNotification("인증에 실패했습니다.");
+                }
+            }
+            setIsAuthReady(true);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    useEffect(() => {
+        if (isAuthReady) {
+            const gamesCollectionRef = collection(db, `artifacts/${appId}/public/data/worldcups`);
+            const q = query(gamesCollectionRef, orderBy('createdAt', 'desc'));
+            
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+                const gamesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setGames([defaultGame, ...gamesData]);
+                setIsLoading(false);
+            }, (error) => {
+                console.error("Error fetching games:", error);
+                setGames([defaultGame]);
+                setIsLoading(false);
+                setNotification("게임 목록을 불러오는데 실패했습니다.");
+            });
+            return () => unsubscribe();
+        }
+    }, [isAuthReady]);
+
+    const handleCreateGame = async (newGame) => {
+        try {
+            const gamesCollectionRef = collection(db, `artifacts/${appId}/public/data/worldcups`);
+            await addDoc(gamesCollectionRef, {
+                ...newGame,
+                createdAt: serverTimestamp()
+            });
+            setPage('home');
+        } catch (error) {
+            console.error("Error creating game:", error);
+            setNotification("게임 생성에 실패했습니다.");
+        }
+    };
+
+    const startGame = (game) => {
+        setSelectedGame(game);
+        setPage('game');
+    };
+
+    const goHome = () => {
+        setPage('home');
+        setSelectedGame(null);
+    };
+
+    const renderPage = () => {
+        switch (page) {
+            case 'create':
+                return <CreatorScreen onCreate={handleCreateGame} onBack={() => setPage('home')} setNotification={setNotification} />;
+            case 'game':
+                return <Game gameData={selectedGame} onGoHome={goHome} />;
+            default:
+                return <HomeScreen games={games} onStartGame={startGame} onCreateNew={() => setPage('create')} />;
+        }
+    };
+
+    return (
+        <>
+            {(!isAuthReady || isLoading) ? (
+                <div className="bg-gray-900 text-white min-h-screen flex items-center justify-center text-2xl">로딩 중...</div>
+            ) : (
+                renderPage()
+            )}
+            <Notification message={notification} onClear={() => setNotification('')} />
+        </>
+    );
+}
+
+// --- Screens ---
+
+function HomeScreen({ games, onStartGame, onCreateNew }) {
+    return (
+        <div className="bg-gray-900 min-h-screen text-white p-4 sm:p-8">
+            <div className="max-w-6xl mx-auto">
+                <header className="text-center mb-10">
+                    <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-600">합리적인 소비생활</h1>
+                    <p className="mt-4 text-lg text-gray-400">나만의 월드컵을 만들고 다른 사람의 월드컵을 즐겨보세요!</p>
+                </header>
+                <div className="text-center mb-12">
+                    <button onClick={onCreateNew} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-lg transition-transform transform hover:scale-105 text-lg shadow-lg">
+                        + 나만의 월드컵 만들기
+                    </button> 
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {games.map(game => (
+                        <div key={game.id} onClick={() => onStartGame(game)} className="bg-gray-800 rounded-lg p-5 cursor-pointer transition-all duration-300 hover:bg-gray-700 hover:shadow-purple-500/20 shadow-lg hover:ring-2 ring-purple-500">
+                            <div className="flex justify-between items-center">
+                                <h2 className="text-xl font-bold text-yellow-400 truncate">{game.title}</h2>
+                                {game.isDefault && <span className="text-xs bg-purple-600 text-white font-bold py-1 px-2 rounded-full">기본</span>}
+                            </div>
+                            <p className="text-gray-400 mt-2">{game.items.length}강</p>
+                            {!game.isDefault && (
+                                <p className="text-xs text-gray-500 mt-3">
+                                    {game.createdAt ? new Date(game.createdAt.seconds * 1000).toLocaleDateString() : '방금 전'}
+                                </p>
+                            )}
+                        </div>
+                    ))}
+                </div>
+                 {games.filter(game => !game.isDefault).length === 0 && (
+                    <p className="text-center text-gray-500 mt-10">아직 만들어진 월드컵이 없어요. 새로운 월드컵을 만들어보세요!</p>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function CreatorScreen({ onCreate, onBack, setNotification }) {
+    const [title, setTitle] = useState('');
+    const [items, setItems] = useState(() => Array(4).fill({ name: '', description: '', imageUrl: '' }));
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleItemChange = (index, field, value) => {
+        const newItems = [...items];
+        newItems[index] = { ...newItems[index], [field]: value };
+        setItems(newItems);
+    };
+
+    const addItems = () => {
+        let newSize;
+        if (items.length === 4) newSize = 8;
+        else if (items.length === 8) newSize = 16;
+        else if (items.length === 16) newSize = 32;
+        else return; // Max reached
+
+        setItems(prevItems => {
+            const newItems = [...prevItems];
+            while (newItems.length < newSize) {
+                newItems.push({ name: '', description: '', imageUrl: '' });
+            }
+            return newItems;
+        });
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!title.trim() || items.some(item => !item.name.trim() || !item.imageUrl.trim())) {
+            setNotification(`제목과 모든 ${items.length}개 아이템의 이름, 이미지 URL을 입력해주세요.`);
+            return;
+        }
+        setIsSubmitting(true);
+        onCreate({ title, items });
+    };
+
+    return (
+        <div className="bg-gray-900 min-h-screen text-white p-4 sm:p-8">
+            <div className="max-w-4xl mx-auto">
+                <h1 className="text-3xl font-bold text-center mb-2">나만의 월드컵 만들기</h1>
+                <p className="text-center text-xl text-yellow-400 mb-8">{items.length}강</p>
+                
+                <form onSubmit={handleSubmit} className="space-y-8 bg-gray-800 p-8 rounded-lg">
+                    <div>
+                        <label className="block text-lg font-bold mb-2 text-yellow-400">월드컵 제목</label>
+                        <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
+                            className="w-full p-3 bg-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            placeholder="예: 최고의 라면 월드컵" required />
+                    </div>
+
+                    <div className="text-center border-t border-b border-gray-700 py-4">
+                        <button
+                            type="button"
+                            onClick={addItems}
+                            disabled={items.length >= 32}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed"
+                        >
+                            강 수 추가
+                        </button>
+                        <p className="text-xs text-gray-400 mt-2">
+                            {items.length < 32 ? `클릭 시 ${items.length * 2}강으로 확장됩니다.` : '최대 32강까지 만들 수 있습니다.'}
+                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {items.map((_, index) => (
+                            <div key={index} className="bg-gray-700 p-4 rounded-lg space-y-3">
+                                <h3 className="font-bold text-lg">아이템 {index + 1}</h3>
+                                <input type="text" placeholder="이름 (예: 신라면)" value={items[index].name} onChange={e => handleItemChange(index, 'name', e.target.value)}
+                                    className="w-full p-2 bg-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500" required />
+                                <input type="text" placeholder="설명 (예: 가격: 1000원)" value={items[index].description} onChange={e => handleItemChange(index, 'description', e.target.value)}
+                                    className="w-full p-2 bg-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500" required />
+                                <input type="url" placeholder="이미지 URL" value={items[index].imageUrl} onChange={e => handleItemChange(index, 'imageUrl', e.target.value)}
+                                    className="w-full p-2 bg-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500" required />
+                            </div>
+                        ))}
+                    </div>
+                    <div className="flex justify-between items-center pt-6">
+                        <button type="button" onClick={onBack} className="bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-lg transition-colors">
+                            뒤로가기
+                        </button>
+                        <button type="submit" disabled={isSubmitting} className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-lg transition-colors disabled:bg-gray-500">
+                            {isSubmitting ? '생성 중...' : '만들기 완료'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+}
+
+function Game({ gameData, onGoHome }) {
+    const [matchups, setMatchups] = useState([]);
+    const [nextRoundCandidates, setNextRoundCandidates] = useState([]);
+    const [history, setHistory] = useState({ chosen: [], eliminated: [] });
+    const [isFinished, setIsFinished] = useState(false);
+    const [roundTitle, setRoundTitle] = useState('');
+    const [finalWinner, setFinalWinner] = useState(null);
+
+    const setupNewRound = useCallback((items) => {
+        if (items.length < 2) {
+            setFinalWinner(items[0]);
+            setIsFinished(true);
+            return;
+        }
+
+        const newMatchups = [];
+        const itemsCopy = [...items];
+        let tempNextRound = [];
+
+        while (itemsCopy.length > 0) {
+            if (itemsCopy.length === 1) {
+                tempNextRound.push(itemsCopy.pop());
+            } else {
+                newMatchups.push([itemsCopy.pop(), itemsCopy.pop()]);
+            }
+        }
+        setNextRoundCandidates(tempNextRound);
+        setMatchups(newMatchups.reverse());
+
+        const totalPlayers = items.length;
+        if (totalPlayers === 2) setRoundTitle('결승');
+        else if (totalPlayers <= 4) setRoundTitle('준결승');
+        else if (totalPlayers <= 8) setRoundTitle('8강');
+        else if (totalPlayers <= 16) setRoundTitle('16강');
+        else setRoundTitle(`${totalPlayers}강`);
+    }, []);
+
+    useEffect(() => {
+        const shuffledItems = [...gameData.items].sort(() => Math.random() - 0.5);
+        setupNewRound(shuffledItems);
+    }, [gameData.items, setupNewRound]);
+
+    const handleChoice = (winner, loser) => {
+        setHistory(prev => ({
+            chosen: [...prev.chosen, winner],
+            eliminated: [...prev.eliminated, loser]
+        }));
+        
+        const remainingMatchups = matchups.slice(1);
+        
+        if (remainingMatchups.length === 0) {
+            setupNewRound([...nextRoundCandidates, winner]);
+            setNextRoundCandidates([]);
+        } else {
+            setMatchups(remainingMatchups);
+            setNextRoundCandidates(prev => [...prev, winner]);
+        }
+    };
+    
+    if (isFinished) {
+        return <WinnerScreen winner={finalWinner} history={history} onGoHome={onGoHome} />;
+    }
+
+    if (matchups.length === 0 && !isFinished) {
+        return <div className="bg-gray-900 text-white min-h-screen flex items-center justify-center text-2xl">대진표 생성 중...</div>;
+    }
+
+    const [p1, p2] = matchups[0];
+    return (
+        <div className="bg-gray-900 min-h-screen flex flex-col items-center justify-center p-4">
+            <header className="text-center mb-8">
+                <h1 className="text-4xl sm:text-5xl font-bold text-white tracking-tight">{gameData.title}</h1>
+                <p className="mt-4 text-2xl text-yellow-400 font-semibold">{roundTitle}</p>
+            </header>
+            <div className="relative w-full max-w-5xl">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+                    <ChoiceCard item={p1} onSelect={() => handleChoice(p1, p2)} />
+                    <ChoiceCard item={p2} onSelect={() => handleChoice(p2, p1)} />
+                </div>
+                <div style={{
+                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                    width: '70px', height: '70px', borderRadius: '50%', display: 'flex',
+                    alignItems: 'center', justifyContent: 'center', fontSize: '2rem',
+                    fontWeight: '900', color: 'white', background: 'linear-gradient(145deg, #f87171, #ef4444)',
+                    border: '4px solid #111827', boxShadow: '0 0 20px rgba(239, 68, 68, 0.5)', zIndex: 10
+                }}>VS</div>
+            </div>
+        </div>
+    );
+}
+
+function ChoiceCard({ item, onSelect }) {
+    return (
+        <div onClick={onSelect} className="bg-gray-800 rounded-lg shadow-lg cursor-pointer transition-transform transform hover:scale-105 overflow-hidden">
+            <img src={item.imageUrl} alt={item.name} className="w-full h-64 object-cover" onError={(e) => { e.target.onerror = null; e.target.src='https://placehold.co/600x400/7f1d1d/white?text=Image+Error'; }} />
+            <div className="p-5 text-center">
+                <h3 className="text-2xl font-bold text-white">{item.name}</h3>
+                <p className="text-lg text-gray-300 mt-1">{item.description}</p>
+            </div>
+        </div>
+    );
+}
+
+function WinnerScreen({ winner, history, onGoHome }) {
+    const [reflection, setReflection] = useState('');
+    const [isSubmitted, setIsSubmitted] = useState(false);
+
+    const handleCapture = () => {
+        const captureElement = document.getElementById('captureArea');
+        const captureBtn = document.getElementById('captureBtn');
+        if (captureBtn) {
+            captureBtn.textContent = '캡쳐 중...';
+            captureBtn.disabled = true;
+        }
+
+        if (window.html2canvas) {
+            window.html2canvas(captureElement, { backgroundColor: '#1f2937', useCORS: true, scale: 2 })
+                .then(canvas => {
+                    const link = document.createElement('a');
+                    link.download = 'my-worldcup-result.png';
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                })
+                .finally(() => {
+                    if (captureBtn) {
+                        captureBtn.textContent = '화면 캡쳐';
+                        captureBtn.disabled = false;
+                    }
+                });
+        } else {
+            console.error('html2canvas is not loaded');
+        }
+    };
+
+    if (!winner) {
+        return (
+            <div className="bg-gray-900 min-h-screen flex flex-col items-center justify-center text-white">
+                <h2 className="text-2xl mb-4">결과를 집계하는 중 오류가 발생했습니다.</h2>
+                <button onClick={onGoHome} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg transition-colors text-lg">
+                    홈으로 돌아가기
+                </button>
+            </div>
+        );
+    }
+
+    return (
+        <div className="bg-gray-900 min-h-screen text-white p-4 sm:p-8 flex justify-center items-center">
+            <div className="text-center w-full max-w-5xl">
+                <div id="captureArea" className="bg-gray-800 p-4 sm:p-8 rounded-lg">
+                    <h2 className="text-4xl font-bold mb-6 text-yellow-400">🏆 최종 우승 🏆</h2>
+                    <div className="bg-gradient-to-r from-yellow-400 to-amber-500 p-8 rounded-2xl shadow-2xl max-w-md mx-auto mb-8 text-gray-900">
+                        <img src={winner.imageUrl} alt={winner.name} className="w-full h-64 object-cover rounded-lg mb-4" />
+                        <p className="text-4xl font-extrabold">{winner.name}</p>
+                        <p className="text-xl font-medium mt-1">{winner.description}</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl mx-auto">
+                        <div className="bg-gray-700 p-4 rounded-lg">
+                            <h3 className="text-2xl font-bold mb-4 text-yellow-400">👑 최종 선택</h3>
+                            <ul className="space-y-2">
+                                <ResultItem item={winner} />
+                            </ul>
+                        </div>
+                        <div className="bg-gray-700 p-4 rounded-lg">
+                            <h3 className="text-2xl font-bold mb-4 text-gray-400">💔 아쉽게 탈락</h3>
+                            <ul className="space-y-2 max-h-48 overflow-y-auto">
+                                {[...new Map(history.eliminated.map(item => [item.name, item])).values()].map(item => <ResultItem key={item.name} item={item} />)}
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div className="mt-10 max-w-4xl mx-auto text-left">
+                        <h3 className="text-2xl font-bold mb-4 text-indigo-400">🤔 생각해보기</h3>
+                        <p className="text-gray-300 mb-4 bg-gray-800 p-4 rounded-lg">
+                            아쉽게 탈락 한 것 중 제일 아쉬운 것을 하나 골라 보고 최종 선택과 비교해 봅시다.
+                            <br />최종 선택이 잘 한 선택이었나요? 그 이유를 적어 봅시다.
+                        </p>
+                        <textarea value={reflection} onChange={(e) => !isSubmitted && setReflection(e.target.value)} readOnly={isSubmitted}
+                            className="w-full h-32 p-3 bg-gray-600 border border-gray-500 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            placeholder="여기에 이유를 적어보세요..." />
+                        {!isSubmitted && (
+                            <div className="text-right mt-4">
+                                <button onClick={() => setIsSubmitted(true)} className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg transition-colors">입력 완료</button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="mt-8 space-x-4">
+                    {isSubmitted && (
+                        <button id="captureBtn" onClick={handleCapture} className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-8 rounded-lg transition-colors text-lg">
+                            화면 캡쳐
+                        </button>
+                    )}
+                    <button onClick={onGoHome} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg transition-colors text-lg">
+                        홈으로 돌아가기
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ResultItem({ item }) {
+    return (
+        <li className="p-3 bg-gray-600 rounded-md flex items-center gap-4">
+            <img src={item.imageUrl} className="w-12 h-12 rounded-md object-cover flex-shrink-0" alt={item.name} />
+            <div className="text-left">
+                <span className="font-semibold block">{item.name}</span>
+                <span className="text-sm text-gray-400">{item.description}</span>
+            </div>
+        </li>
+    );
+}
